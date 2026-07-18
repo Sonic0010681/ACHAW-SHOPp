@@ -127,6 +127,10 @@ function sqlInjectionShield(req, res, next) {
 app.use(sqlInjectionShield);
 app.use(express.static(path.join(__dirname, 'public')));
 
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 
 
 // Helper to sanitize product data (omit totpSecret and IMAP configuration)
