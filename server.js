@@ -157,15 +157,19 @@ function sanitizeProduct(product) {
 }
 
 // Public Endpoint: Get products catalog and active announcement
-app.get('/api/products', (req, res) => {
-  const products = db.getProducts();
-  const sanitized = products.filter(p => p.isActive !== false).map(p => sanitizeProduct(p));
-  const settings = db.getSettings();
-  res.json({
-    products: sanitized,
-    announcementText: settings.announcementText || '',
-    announcementId: settings.announcementId || ''
-  });
+app.get('/api/products', async (req, res) => {
+  try {
+    const [products, settings] = await Promise.all([db.getProducts(), db.getSettings()]);
+    const sanitized = products.filter(p => p.isActive !== false).map(p => sanitizeProduct(p));
+    res.json({
+      products: sanitized,
+      announcementText: settings.announcementText || '',
+      announcementId: settings.announcementId || ''
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Sunucu hatası' });
+  }
 });
 
 
@@ -184,7 +188,7 @@ app.post('/api/verify-key', bruteForceShield, async (req, res) => {
     return res.status(400).json({ error: 'Geçersiz anahtar formatı!' });
   }
 
-  const settings = db.getSettings();
+  const settings = await db.getSettings();
   if (settings.adminKey && safeEqual(keyStr.toUpperCase(), settings.adminKey.toUpperCase())) {
     // Admin key matched! Verify 2FA OTP
     const { code } = req.body;
@@ -192,9 +196,6 @@ app.post('/api/verify-key', bruteForceShield, async (req, res) => {
       return res.json({ require2Fa: true });
     }
 
-    // No fallback secret here on purpose: a hardcoded fallback TOTP secret
-    // means anyone who read this source file could generate valid admin 2FA
-    // codes forever, regardless of what secret is actually configured.
     if (!settings.adminTotpSecret) {
       return res.status(500).json({ error: '2FA yapılandırılmamış! Lütfen admin panelinden bir TOTP secret ayarlayın.' });
     }
@@ -214,13 +215,13 @@ app.post('/api/verify-key', bruteForceShield, async (req, res) => {
     });
   }
 
-  const keyObj = db.getKey(keyStr);
+  const keyObj = await db.getKey(keyStr);
   if (!keyObj) {
     recordFailedAttempt(clientIp);
     return res.status(404).json({ error: 'Geçersiz anahtar! Lütfen kontrol edin.' });
   }
 
-  const product = db.getProduct(keyObj.productId);
+  const product = await db.getProduct(keyObj.productId);
   if (!product) {
     return res.status(404).json({ error: 'Bu anahtara bağlı bir ürün bulunamadı!' });
   }
@@ -259,7 +260,7 @@ app.post('/api/get-otp', async (req, res) => {
     return res.status(400).json({ error: 'Anahtar bilgisi eksik!' });
   }
 
-  const keyObj = db.getKey(keyStr);
+  const keyObj = await db.getKey(keyStr);
   if (!keyObj) {
     return res.status(404).json({ error: 'Geçersiz anahtar!' });
   }
@@ -273,7 +274,7 @@ app.post('/api/get-otp', async (req, res) => {
     return res.status(403).json({ error: 'Giriş kodu alma hakkınız dolmuştur! (Maksimum 3 kez kod alabilirsiniz)' });
   }
 
-  const product = db.getProduct(keyObj.productId);
+  const product = await db.getProduct(keyObj.productId);
   if (!product || !product.totpSecret) {
     return res.status(400).json({ error: 'Bu ürün için 2FA kodu tanımlanmamış!' });
   }
@@ -306,7 +307,7 @@ app.post('/api/get-email-code', async (req, res) => {
     return res.status(400).json({ error: 'Anahtar bilgisi eksik!' });
   }
 
-  const keyObj = db.getKey(keyStr);
+  const keyObj = await db.getKey(keyStr);
   if (!keyObj) {
     return res.status(404).json({ error: 'Geçersiz anahtar!' });
   }
@@ -320,7 +321,7 @@ app.post('/api/get-email-code', async (req, res) => {
     return res.status(403).json({ error: 'Giriş kodu alma hakkınız dolmuştur! (Maksimum 3 kez kod alabilirsiniz)' });
   }
 
-  const product = db.getProduct(keyObj.productId);
+  const product = await db.getProduct(keyObj.productId);
   if (!product || !product.imapHost || !product.imapUser || !product.imapPassword) {
     return res.status(400).json({ error: 'Bu ürün için e-posta kod okuma sistemi tanımlanmamış!' });
   }
@@ -356,10 +357,10 @@ app.post('/api/get-email-code', async (req, res) => {
 
 
 // Admin auth middleware for endpoints
-function adminKeyAuth(req, res, next) {
+async function adminKeyAuth(req, res, next) {
   const keyHeader = req.headers['x-admin-key'];
   const clientIp = req.clientIp || req.ip;
-  const settings = db.getSettings();
+  const settings = await db.getSettings();
 
   if (!keyHeader || !settings.adminKey || !safeEqual(keyHeader.toUpperCase(), settings.adminKey.toUpperCase())) {
     return res.status(401).json({ error: 'Yetkisiz erişim! Admin anahtarı geçersiz.' });
@@ -374,8 +375,9 @@ function adminKeyAuth(req, res, next) {
 }
 
 // Admin APIs protected by admin key
-app.get('/api/admin/products', adminKeyAuth, (req, res) => {
-  res.json(db.getProducts());
+app.get('/api/admin/products', adminKeyAuth, async (req, res) => {
+  const products = await db.getProducts();
+  res.json(products);
 });
 
 app.post('/api/admin/products', adminKeyAuth, async (req, res) => {
@@ -395,9 +397,8 @@ app.delete('/api/admin/products/:id', adminKeyAuth, async (req, res) => {
   res.json({ success: true });
 });
 
-app.get('/api/admin/keys', adminKeyAuth, (req, res) => {
-  const keys = db.getKeys();
-  const products = db.getProducts();
+app.get('/api/admin/keys', adminKeyAuth, async (req, res) => {
+  const [keys, products] = await Promise.all([db.getKeys(), db.getProducts()]);
   const enrichedKeys = keys.map(k => {
     const p = products.find(prod => prod.id === k.productId);
     return {
@@ -441,7 +442,7 @@ app.post('/api/admin/keys', adminKeyAuth, async (req, res) => {
     const genPart = () => Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
     keyStr = `ACHAW-${genPart()}-${genPart()}-${genPart()}`;
   }
-  if (db.getKey(keyStr)) {
+  if (await db.getKey(keyStr)) {
     return res.status(400).json({ error: 'Bu anahtar zaten mevcut!' });
   }
   const newKey = {
@@ -457,7 +458,7 @@ app.post('/api/admin/keys', adminKeyAuth, async (req, res) => {
 
 app.post('/api/admin/keys/reset-ip', adminKeyAuth, async (req, res) => {
   const { key: keyStr } = req.body;
-  const keyObj = db.getKey(keyStr);
+  const keyObj = await db.getKey(keyStr);
   if (!keyObj) {
     return res.status(404).json({ error: 'Anahtar bulunamadı!' });
   }
@@ -476,7 +477,7 @@ app.delete('/api/admin/keys/:key', adminKeyAuth, async (req, res) => {
 
 app.post('/api/admin/settings', adminKeyAuth, async (req, res) => {
   const { adminKey, adminTotpSecret, announcementText } = req.body;
-  const settings = db.getSettings();
+  const settings = await db.getSettings();
   
   if (adminKey) {
     if (adminKey.length < 6) {
@@ -500,7 +501,7 @@ app.post('/api/admin/settings', adminKeyAuth, async (req, res) => {
 
 app.post('/api/admin/keys-clear-all', adminKeyAuth, async (req, res) => {
   const { code } = req.body;
-  const settings = db.getSettings();
+  const settings = await db.getSettings();
   if (!code || !authenticator.check(code, settings.adminTotpSecret)) {
     return res.status(400).json({ error: '2FA doğrulama kodu geçersiz!' });
   }
