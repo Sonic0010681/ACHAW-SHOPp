@@ -2,11 +2,23 @@ const express = require('express');
 const requestIp = require('request-ip');
 const { authenticator } = require('otplib');
 const path = require('path');
+const crypto = require('crypto');
 const db = require('./database');
 const { getLatestOpenAICode } = require('./emailReader');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Constant-time string comparison to prevent timing attacks on admin key checks.
+// A normal === comparison leaks how many leading characters matched via response
+// time, which lets an attacker guess the key one character at a time.
+function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
 
 // Middleware
 app.use(express.json({ limit: '10mb' }));
@@ -125,10 +137,10 @@ function sqlInjectionShield(req, res, next) {
 }
 
 app.use(sqlInjectionShield);
-app.use(express.static(path.join(__dirname)));
+app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 
@@ -173,15 +185,20 @@ app.post('/api/verify-key', bruteForceShield, async (req, res) => {
   }
 
   const settings = db.getSettings();
-  if (settings.adminKey && keyStr.toUpperCase() === settings.adminKey.toUpperCase()) {
+  if (settings.adminKey && safeEqual(keyStr.toUpperCase(), settings.adminKey.toUpperCase())) {
     // Admin key matched! Verify 2FA OTP
     const { code } = req.body;
     if (!code) {
       return res.json({ require2Fa: true });
     }
 
-    const adminTotpSecret = settings.adminTotpSecret || 'JBSWY3DPEHPK3PXP';
-    const isValidTotp = authenticator.verify({ token: code, secret: adminTotpSecret });
+    // No fallback secret here on purpose: a hardcoded fallback TOTP secret
+    // means anyone who read this source file could generate valid admin 2FA
+    // codes forever, regardless of what secret is actually configured.
+    if (!settings.adminTotpSecret) {
+      return res.status(500).json({ error: '2FA yapılandırılmamış! Lütfen admin panelinden bir TOTP secret ayarlayın.' });
+    }
+    const isValidTotp = authenticator.verify({ token: code, secret: settings.adminTotpSecret });
     if (!isValidTotp) {
       recordFailedAttempt(clientIp);
       return res.status(403).json({ error: 'Google Authenticator kodu hatalı!' });
@@ -344,7 +361,7 @@ function adminKeyAuth(req, res, next) {
   const clientIp = req.clientIp || req.ip;
   const settings = db.getSettings();
 
-  if (!keyHeader || keyHeader.toUpperCase() !== settings.adminKey.toUpperCase()) {
+  if (!keyHeader || !settings.adminKey || !safeEqual(keyHeader.toUpperCase(), settings.adminKey.toUpperCase())) {
     return res.status(401).json({ error: 'Yetkisiz erişim! Admin anahtarı geçersiz.' });
   }
 

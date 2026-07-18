@@ -1,6 +1,8 @@
 const admin = require('firebase-admin');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const { authenticator } = require('otplib');
 
 let serviceAccount;
 
@@ -18,12 +20,20 @@ if (fs.existsSync(localCredsPath)) {
 }
 
 if (!serviceAccount) {
-  console.error("FATAL: Firebase service account configuration missing! Place 'firebase-credentials.json' in root or set 'FIREBASE_SERVICE_ACCOUNT' env variable.");
-  process.exit(1);
+  // IMPORTANT: Never use process.exit() inside a Vercel serverless function.
+  // It kills the whole invocation with no HTTP response, which is what causes
+  // the frontend to hang on "loading..." forever. Throwing lets Express/Vercel
+  // turn this into a proper 500 response instead.
+  throw new Error(
+    "FATAL: Firebase service account configuration missing! " +
+    "Set the FIREBASE_SERVICE_ACCOUNT environment variable in your Vercel project " +
+    "(Settings -> Environment Variables) with the full JSON content of your " +
+    "service account key on a single line."
+  );
 }
 
 // Initialize Firebase Admin safely
-if (admin.getApps().length === 0) {
+if (admin.apps.length === 0) {
   admin.initializeApp({
     credential: admin.cert(serviceAccount)
   });
@@ -32,14 +42,23 @@ if (admin.getApps().length === 0) {
 const { getFirestore } = require('firebase-admin/firestore');
 const db = getFirestore();
 
+// Generate a strong, unpredictable default admin key + TOTP secret.
+// These are ONLY used the very first time the app runs (when Firestore has no
+// 'settings/config' doc yet). After that, whatever is stored in Firestore wins.
+// Hardcoding a fixed key/secret here (as the old code did) means anyone who
+// ever saw this source file could log in as admin and generate valid 2FA
+// codes forever - so we generate fresh random values on first boot instead.
+function generateSecureAdminKey() {
+  return 'ACHAW-ADMIN-' + crypto.randomBytes(12).toString('hex').toUpperCase();
+}
+
 // Keep local in-memory cache synchronized for performance
 let cache = {
   products: [],
   keys: [],
   settings: {
-    adminPassword: "admin",
-    adminKey: "AchW>#31>!!...1_!*34",
-    adminTotpSecret: "JBSWY3DPEHPK3PXP"
+    adminKey: generateSecureAdminKey(),
+    adminTotpSecret: authenticator.generateSecret()
   }
 };
 
@@ -47,22 +66,31 @@ let cache = {
 db.collection('products').onSnapshot(snapshot => {
   cache.products = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
   console.log(`[FIREBASE] Synced ${cache.products.length} products.`);
-}, err => console.error(err));
+}, err => console.error('[FIREBASE] products listener error:', err));
 
 db.collectionGroup('keys').onSnapshot(snapshot => {
   cache.keys = snapshot.docs.map(doc => doc.data());
   console.log(`[FIREBASE] Synced ${cache.keys.length} keys.`);
-}, err => console.error(err));
+}, err => console.error('[FIREBASE] keys listener error:', err));
 
 db.collection('settings').doc('config').onSnapshot(doc => {
   if (doc.exists) {
     cache.settings = doc.data();
     console.log(`[FIREBASE] Synced configuration settings.`);
   } else {
-    // Seed initial settings in Firebase if empty
-    db.collection('settings').doc('config').set(cache.settings);
+    // Seed initial settings in Firebase if empty (first-ever boot only)
+    db.collection('settings').doc('config').set(cache.settings)
+      .then(() => {
+        console.log('================ İLK KURULUM ================');
+        console.log('Admin Key   :', cache.settings.adminKey);
+        console.log('TOTP Secret :', cache.settings.adminTotpSecret);
+        console.log('Bu değerleri şimdi bir yere kopyala - bir daha bu şekilde gösterilmeyecek.');
+        console.log('Admin panelinden istediğin zaman değiştirebilirsin.');
+        console.log('===============================================');
+      })
+      .catch(err => console.error('[FIREBASE] failed to seed settings:', err));
   }
-}, err => console.error(err));
+}, err => console.error('[FIREBASE] settings listener error:', err));
 
 module.exports = {
   getProducts: () => cache.products,
@@ -87,7 +115,7 @@ module.exports = {
   getKey: (keyStr) => cache.keys.find(k => k.key.toUpperCase() === keyStr.toUpperCase()),
   saveKeys: async (keysArray) => {
     const batch = db.batch();
-    
+
     // Clear old keys first (if empty array represents clearing)
     if (keysArray.length === 0) {
       const allKeysSnap = await db.collectionGroup('keys').get();
