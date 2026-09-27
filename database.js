@@ -43,13 +43,9 @@ if (!serviceAccount) {
   }
 }
 
-function generateSecureAdminKey() {
-  return 'ACHAW-ADMIN-' + crypto.randomBytes(12).toString('hex').toUpperCase();
-}
-
 const DEFAULT_SETTINGS = {
-  adminKey: generateSecureAdminKey(),
-  adminTotpSecret: authenticator.generateSecret()
+  adminKey: 'ACHAW-ADMIN-1234',
+  adminTotpSecret: ''
 };
 
 // Local fallback memory stores

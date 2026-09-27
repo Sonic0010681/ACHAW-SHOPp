@@ -190,19 +190,18 @@ app.post('/api/verify-key', bruteForceShield, async (req, res) => {
 
     const settings = await db.getSettings();
     if (settings.adminKey && safeEqual(keyStr.toUpperCase(), settings.adminKey.toUpperCase())) {
-      // Admin key matched! Verify 2FA OTP
-      const { code } = req.body;
-      if (!code) {
-        return res.json({ require2Fa: true });
-      }
+      // If 2FA TOTP secret is configured, require 2FA OTP code
+      if (settings.adminTotpSecret) {
+        const { code } = req.body;
+        if (!code) {
+          return res.json({ require2Fa: true });
+        }
 
-      if (!settings.adminTotpSecret) {
-        return res.status(500).json({ error: '2FA yapılandırılmamış! Lütfen admin panelinden bir TOTP secret ayarlayın.' });
-      }
-      const isValidTotp = authenticator.verify({ token: code, secret: settings.adminTotpSecret });
-      if (!isValidTotp) {
-        recordFailedAttempt(clientIp);
-        return res.status(403).json({ error: 'Google Authenticator kodu hatalı!' });
+        const isValidTotp = authenticator.verify({ token: code, secret: settings.adminTotpSecret });
+        if (!isValidTotp) {
+          recordFailedAttempt(clientIp);
+          return res.status(403).json({ error: 'Google Authenticator kodu hatalı!' });
+        }
       }
 
       settings.adminIp = clientIp;
