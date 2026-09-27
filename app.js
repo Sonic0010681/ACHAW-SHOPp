@@ -34,11 +34,21 @@ navBtnCatalog.onclick = () => {
 
 // Verify key action
 async function verifyKey(otpCode = '') {
+  const submitBtn = document.getElementById('btn-submit-key');
   const keyInput = document.getElementById('activation-key').value.trim();
   
   if (!keyInput) {
     showAlert('Lütfen bir teslimat anahtarı (key) girin!', 'error');
     return;
+  }
+
+  const originalBtnHtml = submitBtn ? submitBtn.innerHTML : '';
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.style.opacity = '0.7';
+    submitBtn.style.cursor = 'wait';
+    const spanEl = submitBtn.querySelector('span');
+    if (spanEl) spanEl.innerText = 'Sorgulanıyor...';
   }
 
   try {
@@ -66,14 +76,14 @@ async function verifyKey(otpCode = '') {
     if (data.require2Fa) {
       const modal2fa = document.getElementById('admin-2fa-modal');
       const otpInput = document.getElementById('admin-otp-input');
-      const submitBtn = document.getElementById('admin-2fa-btn-submit');
+      const submitBtn2 = document.getElementById('admin-2fa-btn-submit');
       const cancelBtn = document.getElementById('admin-2fa-btn-cancel');
 
       modal2fa.style.display = 'flex';
       otpInput.value = '';
       otpInput.focus();
 
-      submitBtn.onclick = () => {
+      submitBtn2.onclick = () => {
         const code = otpInput.value.trim();
         if (code.length === 6) {
           modal2fa.style.display = 'none';
@@ -102,6 +112,13 @@ async function verifyKey(otpCode = '') {
 
   } catch (error) {
     showAlert('Sunucuya bağlanılamadı. Lütfen internet bağlantınızı kontrol edin.', 'error');
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.style.opacity = '1';
+      submitBtn.style.cursor = 'pointer';
+      submitBtn.innerHTML = originalBtnHtml;
+    }
   }
 }
 
@@ -418,21 +435,27 @@ function apply3DTilt(element) {
 
 // Security event listeners removed to allow normal user input and inspection
 
+function hidePreloader() {
+  const preloader = document.getElementById('preloader');
+  if (preloader) {
+    preloader.classList.add('hidden');
+    preloader.style.opacity = '0';
+    preloader.style.visibility = 'hidden';
+    preloader.style.pointerEvents = 'none';
+    setTimeout(() => {
+      preloader.style.display = 'none';
+    }, 400);
+  }
+}
+
 // Load resources on start
 document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.btn').forEach(el => apply3DTilt(el));
   checkAnnouncements();
+  setTimeout(hidePreloader, 600);
 });
 
-window.addEventListener('load', () => {
-  setTimeout(() => {
-    const preloader = document.getElementById('preloader');
-    if (preloader) {
-      preloader.style.opacity = '0';
-      preloader.style.visibility = 'hidden';
-    }
-  }, 1800);
-});
+window.addEventListener('load', hidePreloader);
 
 // --- Dynamic Admin Dashboard Injection ---
 function renderAdminDashboard() {
