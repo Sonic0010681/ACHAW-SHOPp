@@ -106,14 +106,20 @@ module.exports = {
     if (useLocalDb) {
       return localKeys.get(target) || null;
     }
+    
+    // Try indexed query first, fall back to full scan if index is missing
     try {
-      // CollectionGroup query by key field
       const snap = await db.collectionGroup('keys')
         .where('key', '==', target)
         .limit(1)
         .get();
       if (!snap.empty) return snap.docs[0].data();
-      // Fallback: search across all keys
+    } catch (indexErr) {
+      console.warn("CollectionGroup indexed query failed (index may be missing), using fallback scan:", indexErr.code);
+    }
+
+    // Fallback: scan all keys (works without index)
+    try {
       const allSnap = await db.collectionGroup('keys').get();
       const found = allSnap.docs.find(d => {
         const k = d.data().key;
@@ -121,7 +127,7 @@ module.exports = {
       });
       return found ? found.data() : null;
     } catch (err) {
-      console.error("Firestore getKey error:", err);
+      console.error("Firestore getKey fallback error:", err);
       return null;
     }
   },
