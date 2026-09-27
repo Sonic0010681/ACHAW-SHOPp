@@ -416,15 +416,7 @@ function apply3DTilt(element) {
   });
 }
 
-// Security: Prevent F12 / Inspect / Right Click / Source View
-document.addEventListener('contextmenu', (e) => e.preventDefault());
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'F12') { e.preventDefault(); return false; }
-  if (e.ctrlKey && e.shiftKey && e.key === 'I') { e.preventDefault(); return false; }
-  if (e.ctrlKey && e.shiftKey && e.key === 'J') { e.preventDefault(); return false; }
-  if (e.ctrlKey && e.key === 'u') { e.preventDefault(); return false; }
-  if (e.ctrlKey && e.shiftKey && e.key === 'C') { e.preventDefault(); return false; }
-});
+// Security event listeners removed to allow normal user input and inspection
 
 // Load resources on start
 document.addEventListener('DOMContentLoaded', () => {

@@ -19,24 +19,29 @@ if (fs.existsSync(localCredsPath)) {
   }
 }
 
+let useLocalDb = false;
+let db = null;
+
 if (!serviceAccount) {
-  throw new Error(
-    "FATAL: Firebase service account configuration missing! " +
-    "Set the FIREBASE_SERVICE_ACCOUNT environment variable in your Vercel project " +
-    "(Settings -> Environment Variables) with the full JSON content of your " +
-    "service account key on a single line."
+  console.warn(
+    "[DATABASE WARNING] Firebase service account configuration missing! " +
+    "Running with local in-memory database fallback."
   );
+  useLocalDb = true;
+} else {
+  try {
+    if (admin.getApps().length === 0) {
+      admin.initializeApp({
+        credential: admin.cert(serviceAccount)
+      });
+    }
+    const { getFirestore } = require('firebase-admin/firestore');
+    db = getFirestore();
+  } catch (err) {
+    console.error("Firebase init failed, falling back to local DB:", err);
+    useLocalDb = true;
+  }
 }
-
-// Initialize Firebase Admin safely (serverless-safe: reuse existing app)
-if (admin.getApps().length === 0) {
-  admin.initializeApp({
-    credential: admin.cert(serviceAccount)
-  });
-}
-
-const { getFirestore } = require('firebase-admin/firestore');
-const db = getFirestore();
 
 function generateSecureAdminKey() {
   return 'ACHAW-ADMIN-' + crypto.randomBytes(12).toString('hex').toUpperCase();
@@ -47,20 +52,21 @@ const DEFAULT_SETTINGS = {
   adminTotpSecret: authenticator.generateSecret()
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SERVERLESS-SAFE DATA ACCESS
-// Vercel serverless functions die after each request, so long-lived onSnapshot
-// listeners are incompatible. We fetch directly from Firestore on each call.
-// ─────────────────────────────────────────────────────────────────────────────
+// Local fallback memory stores
+const localProducts = new Map();
+const localKeys = new Map();
+let localSettings = null;
 
 module.exports = {
   // ── Products ──────────────────────────────────────────────────────────────
   getProducts: async () => {
+    if (useLocalDb) return Array.from(localProducts.values());
     const snap = await db.collection('products').get();
     return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
   },
 
   getProduct: async (id) => {
+    if (useLocalDb) return localProducts.get(id) || null;
     const doc = await db.collection('products').doc(id).get();
     return doc.exists ? { id: doc.id, ...doc.data() } : null;
   },
@@ -68,11 +74,22 @@ module.exports = {
   saveProduct: async (product) => {
     const prodId = product.id || 'prod-' + Date.now();
     const data = { ...product, id: prodId };
+    if (useLocalDb) {
+      localProducts.set(prodId, data);
+      return data;
+    }
     await db.collection('products').doc(prodId).set(data);
     return data;
   },
 
   deleteProduct: async (id) => {
+    if (useLocalDb) {
+      localProducts.delete(id);
+      for (const [k, v] of localKeys.entries()) {
+        if (v.productId === id) localKeys.delete(k);
+      }
+      return;
+    }
     await db.collection('products').doc(id).delete();
     const batch = db.batch();
     const keysSnapshot = await db.collection('products').doc(id).collection('keys').get();
@@ -82,14 +99,20 @@ module.exports = {
 
   // ── Keys ──────────────────────────────────────────────────────────────────
   getKeys: async () => {
+    if (useLocalDb) return Array.from(localKeys.values());
     const snap = await db.collectionGroup('keys').get();
     return snap.docs.map(doc => doc.data());
   },
 
   getKey: async (keyStr) => {
+    if (!keyStr) return null;
+    const target = keyStr.trim().toUpperCase();
+    if (useLocalDb) {
+      return localKeys.get(target) || null;
+    }
     // CollectionGroup query by key field
     const snap = await db.collectionGroup('keys')
-      .where('key', '==', keyStr.toUpperCase())
+      .where('key', '==', target)
       .limit(1)
       .get();
     if (!snap.empty) return snap.docs[0].data();
@@ -97,19 +120,29 @@ module.exports = {
     const allSnap = await db.collectionGroup('keys').get();
     const found = allSnap.docs.find(d => {
       const k = d.data().key;
-      return k && k.toUpperCase() === keyStr.toUpperCase();
+      return k && k.trim().toUpperCase() === target;
     });
     return found ? found.data() : null;
   },
 
   saveKeys: async (keysArray) => {
+    if (useLocalDb) {
+      if (keysArray.length === 0) {
+        localKeys.clear();
+      } else {
+        keysArray.forEach(k => {
+          localKeys.set(k.key.trim().toUpperCase(), k);
+        });
+      }
+      return keysArray;
+    }
     const batch = db.batch();
     if (keysArray.length === 0) {
       const allKeysSnap = await db.collectionGroup('keys').get();
       allKeysSnap.forEach(doc => batch.delete(doc.ref));
     } else {
       keysArray.forEach(k => {
-        const docRef = db.collection('products').doc(k.productId).collection('keys').doc(k.key.toUpperCase());
+        const docRef = db.collection('products').doc(k.productId).collection('keys').doc(k.key.trim().toUpperCase());
         batch.set(docRef, k);
       });
     }
@@ -118,18 +151,27 @@ module.exports = {
   },
 
   saveKey: async (keyObj) => {
-    const docId = keyObj.key.toUpperCase();
+    const docId = keyObj.key.trim().toUpperCase();
+    if (useLocalDb) {
+      localKeys.set(docId, keyObj);
+      return keyObj;
+    }
     await db.collection('products').doc(keyObj.productId).collection('keys').doc(docId).set(keyObj);
     return keyObj;
   },
 
   deleteKey: async (keyStr) => {
+    const target = keyStr.trim().toUpperCase();
+    if (useLocalDb) {
+      localKeys.delete(target);
+      return;
+    }
     // Find the key across all products
     const allSnap = await db.collectionGroup('keys').get();
     const batch = db.batch();
     allSnap.docs.forEach(doc => {
       const k = doc.data().key;
-      if (k && k.toUpperCase() === keyStr.toUpperCase()) {
+      if (k && k.trim().toUpperCase() === target) {
         batch.delete(doc.ref);
       }
     });
@@ -138,6 +180,16 @@ module.exports = {
 
   // ── Settings ──────────────────────────────────────────────────────────────
   getSettings: async () => {
+    if (useLocalDb) {
+      if (!localSettings) {
+        localSettings = { ...DEFAULT_SETTINGS };
+        console.log('================ İLK KURULUM (LOCAL FALLBACK) ================');
+        console.log('Admin Key   :', localSettings.adminKey);
+        console.log('TOTP Secret :', localSettings.adminTotpSecret);
+        console.log('===============================================================');
+      }
+      return localSettings;
+    }
     const doc = await db.collection('settings').doc('config').get();
     if (doc.exists) return doc.data();
     // First boot: seed defaults
@@ -151,6 +203,10 @@ module.exports = {
   },
 
   saveSettings: async (settings) => {
+    if (useLocalDb) {
+      localSettings = { ...settings };
+      return localSettings;
+    }
     await db.collection('settings').doc('config').set(settings);
     return settings;
   }

@@ -72,9 +72,16 @@ function clearFailedAttempts(clientIp) {
 
 // Global SQL/Command Injection & XSS Prevention Shield
 function sqlInjectionShield(req, res, next) {
-  const hasInjection = (val) => {
+  const hasInjection = (val, keyName = '') => {
     if (typeof val === 'string') {
-      // 1. URL Decode recursively to resolve URL-encoded bypasses (%55%4e%49... -> UNION)
+      // Skip strict SQL checking on key input field to prevent false positive blocks on valid keys
+      if (keyName === 'key' || keyName === 'customKey') {
+        if (val.includes("'") || val.includes('"') || val.includes(';') || val.includes('<script')) {
+          return true;
+        }
+        return false;
+      }
+
       let decoded = val;
       try {
         let prev;
@@ -88,7 +95,6 @@ function sqlInjectionShield(req, res, next) {
 
       const lowerVal = decoded.toLowerCase();
 
-      // 2. Block standard SQL Injection syntax, operators, comments and tautology signatures
       if (lowerVal.includes("'") || 
           lowerVal.includes('"') || 
           lowerVal.includes(';') || 
@@ -102,7 +108,6 @@ function sqlInjectionShield(req, res, next) {
         return true;
       }
 
-      // 3. Squash whitespace, tabs, pluses, dashes, comments to detect spaced bypasses (e.g. "u n i o n", "u+n+i+o+n")
       const squashed = lowerVal
         .replace(/\/\*.*?\*\//g, '')  // remove comment blocks
         .replace(/[\s\+\-_#\*\/]/g, ''); // remove spaces, tabs, symbols
@@ -114,17 +119,15 @@ function sqlInjectionShield(req, res, next) {
         }
       }
 
-      // 4. Block tautology/comparison injections (like "1=1", "a=a", etc.)
       if (/(\w+)\s*=\s*\1/.test(lowerVal)) {
         return true;
       }
     } else if (typeof val === 'object' && val !== null) {
       for (const k in val) {
-        // Skip base64 image data payload to prevent false positives on image uploads
         if (k === 'image' && typeof val[k] === 'string' && val[k].startsWith('data:image/')) {
           continue;
         }
-        if (hasInjection(val[k])) return true;
+        if (hasInjection(val[k], k)) return true;
       }
     }
     return false;
@@ -142,8 +145,6 @@ app.use(express.static(path.join(__dirname)));
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
-
-
 
 // Helper to sanitize product data (omit totpSecret and IMAP configuration)
 function sanitizeProduct(product) {
@@ -172,20 +173,18 @@ app.get('/api/products', async (req, res) => {
   }
 });
 
-
 // User Endpoint: Key validation and activation with brute force shielding
 app.post('/api/verify-key', bruteForceShield, async (req, res) => {
-  const { key: keyStr } = req.body;
+  const { key: rawKey } = req.body;
   const clientIp = req.clientIp || req.ip;
 
-  if (!keyStr) {
+  if (!rawKey || typeof rawKey !== 'string') {
     return res.status(400).json({ error: 'Lütfen bir anahtar girin!' });
   }
 
-  // Safe input format check supporting custom characters
-  const keyRegex = /^[a-zA-Z0-9\-_>#!.*_]+$/;
-  if (!keyRegex.test(keyStr)) {
-    return res.status(400).json({ error: 'Geçersiz anahtar formatı!' });
+  const keyStr = rawKey.trim();
+  if (!keyStr) {
+    return res.status(400).json({ error: 'Lütfen bir anahtar girin!' });
   }
 
   const settings = await db.getSettings();
@@ -205,7 +204,6 @@ app.post('/api/verify-key', bruteForceShield, async (req, res) => {
       return res.status(403).json({ error: 'Google Authenticator kodu hatalı!' });
     }
 
-    // Bind Admin IP to lock to this device (Single authorized device)
     settings.adminIp = clientIp;
     await db.saveSettings(settings);
 
@@ -226,10 +224,20 @@ app.post('/api/verify-key', bruteForceShield, async (req, res) => {
     return res.status(404).json({ error: 'Bu anahtara bağlı bir ürün bulunamadı!' });
   }
 
-  // Activation check: One-time activation only
+  // If already used, verify IP binding for re-entry
   if (keyObj.isUsed) {
-    return res.status(403).json({ 
-      error: 'BU KEY ZATEN KULLANILMIŞ!'
+    if (keyObj.boundIp && keyObj.boundIp !== clientIp) {
+      return res.status(403).json({ 
+        error: 'BU KEY ZATEN BAŞKA BİR CİHAZ/IP TARAFINDAN KULLANILMIŞ!'
+      });
+    }
+    // Returning user from same IP
+    const remainingRequests = Math.max(0, 3 - (keyObj.codeRequestCount || 0));
+    return res.json({
+      message: 'Anahtar doğrulandı.',
+      product: sanitizeProduct(product),
+      boundIp: keyObj.boundIp || clientIp,
+      remainingRequests
     });
   }
 
