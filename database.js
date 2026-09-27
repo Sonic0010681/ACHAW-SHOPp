@@ -110,19 +110,24 @@ module.exports = {
     if (useLocalDb) {
       return localKeys.get(target) || null;
     }
-    // CollectionGroup query by key field
-    const snap = await db.collectionGroup('keys')
-      .where('key', '==', target)
-      .limit(1)
-      .get();
-    if (!snap.empty) return snap.docs[0].data();
-    // Fallback: case-insensitive search (key might be stored as-is)
-    const allSnap = await db.collectionGroup('keys').get();
-    const found = allSnap.docs.find(d => {
-      const k = d.data().key;
-      return k && k.trim().toUpperCase() === target;
-    });
-    return found ? found.data() : null;
+    try {
+      // CollectionGroup query by key field
+      const snap = await db.collectionGroup('keys')
+        .where('key', '==', target)
+        .limit(1)
+        .get();
+      if (!snap.empty) return snap.docs[0].data();
+      // Fallback: search across all keys
+      const allSnap = await db.collectionGroup('keys').get();
+      const found = allSnap.docs.find(d => {
+        const k = d.data().key;
+        return k && k.trim().toUpperCase() === target;
+      });
+      return found ? found.data() : null;
+    } catch (err) {
+      console.error("Firestore getKey error:", err);
+      return null;
+    }
   },
 
   saveKeys: async (keysArray) => {

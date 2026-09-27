@@ -175,88 +175,93 @@ app.get('/api/products', async (req, res) => {
 
 // User Endpoint: Key validation and activation with brute force shielding
 app.post('/api/verify-key', bruteForceShield, async (req, res) => {
-  const { key: rawKey } = req.body;
-  const clientIp = req.clientIp || req.ip;
+  try {
+    const { key: rawKey } = req.body;
+    const clientIp = req.clientIp || req.ip;
 
-  if (!rawKey || typeof rawKey !== 'string') {
-    return res.status(400).json({ error: 'Lütfen bir anahtar girin!' });
-  }
-
-  const keyStr = rawKey.trim();
-  if (!keyStr) {
-    return res.status(400).json({ error: 'Lütfen bir anahtar girin!' });
-  }
-
-  const settings = await db.getSettings();
-  if (settings.adminKey && safeEqual(keyStr.toUpperCase(), settings.adminKey.toUpperCase())) {
-    // Admin key matched! Verify 2FA OTP
-    const { code } = req.body;
-    if (!code) {
-      return res.json({ require2Fa: true });
+    if (!rawKey || typeof rawKey !== 'string') {
+      return res.status(400).json({ error: 'Lütfen bir anahtar girin!' });
     }
 
-    if (!settings.adminTotpSecret) {
-      return res.status(500).json({ error: '2FA yapılandırılmamış! Lütfen admin panelinden bir TOTP secret ayarlayın.' });
-    }
-    const isValidTotp = authenticator.verify({ token: code, secret: settings.adminTotpSecret });
-    if (!isValidTotp) {
-      recordFailedAttempt(clientIp);
-      return res.status(403).json({ error: 'Google Authenticator kodu hatalı!' });
+    const keyStr = rawKey.trim();
+    if (!keyStr) {
+      return res.status(400).json({ error: 'Lütfen bir anahtar girin!' });
     }
 
-    settings.adminIp = clientIp;
-    await db.saveSettings(settings);
+    const settings = await db.getSettings();
+    if (settings.adminKey && safeEqual(keyStr.toUpperCase(), settings.adminKey.toUpperCase())) {
+      // Admin key matched! Verify 2FA OTP
+      const { code } = req.body;
+      if (!code) {
+        return res.json({ require2Fa: true });
+      }
 
-    return res.json({
-      isAdmin: true,
-      adminKey: settings.adminKey
-    });
-  }
+      if (!settings.adminTotpSecret) {
+        return res.status(500).json({ error: '2FA yapılandırılmamış! Lütfen admin panelinden bir TOTP secret ayarlayın.' });
+      }
+      const isValidTotp = authenticator.verify({ token: code, secret: settings.adminTotpSecret });
+      if (!isValidTotp) {
+        recordFailedAttempt(clientIp);
+        return res.status(403).json({ error: 'Google Authenticator kodu hatalı!' });
+      }
 
-  const keyObj = await db.getKey(keyStr);
-  if (!keyObj) {
-    recordFailedAttempt(clientIp);
-    return res.status(404).json({ error: 'Geçersiz anahtar! Lütfen kontrol edin.' });
-  }
+      settings.adminIp = clientIp;
+      await db.saveSettings(settings);
 
-  const product = await db.getProduct(keyObj.productId);
-  if (!product) {
-    return res.status(404).json({ error: 'Bu anahtara bağlı bir ürün bulunamadı!' });
-  }
-
-  // If already used, verify IP binding for re-entry
-  if (keyObj.isUsed) {
-    if (keyObj.boundIp && keyObj.boundIp !== clientIp) {
-      return res.status(403).json({ 
-        error: 'BU KEY ZATEN BAŞKA BİR CİHAZ/IP TARAFINDAN KULLANILMIŞ!'
+      return res.json({
+        isAdmin: true,
+        adminKey: settings.adminKey
       });
     }
-    // Returning user from same IP
+
+    const keyObj = await db.getKey(keyStr);
+    if (!keyObj) {
+      recordFailedAttempt(clientIp);
+      return res.status(404).json({ error: 'Geçersiz anahtar! Lütfen kontrol edin.' });
+    }
+
+    const product = await db.getProduct(keyObj.productId);
+    if (!product) {
+      return res.status(404).json({ error: 'Bu anahtara bağlı bir ürün bulunamadı!' });
+    }
+
+    // If already used, verify IP binding for re-entry
+    if (keyObj.isUsed) {
+      if (keyObj.boundIp && keyObj.boundIp !== clientIp) {
+        return res.status(403).json({ 
+          error: 'BU KEY ZATEN BAŞKA BİR CİHAZ/IP TARAFINDAN KULLANILMIŞ!'
+        });
+      }
+      // Returning user from same IP
+      const remainingRequests = Math.max(0, 3 - (keyObj.codeRequestCount || 0));
+      return res.json({
+        message: 'Anahtar doğrulandı.',
+        product: sanitizeProduct(product),
+        boundIp: keyObj.boundIp || clientIp,
+        remainingRequests
+      });
+    }
+
+    // First use: Bind IP and mark as used
+    keyObj.isUsed = true;
+    keyObj.usedAt = new Date().toISOString();
+    keyObj.boundIp = clientIp;
+    await db.saveKey(keyObj);
+
     const remainingRequests = Math.max(0, 3 - (keyObj.codeRequestCount || 0));
-    return res.json({
-      message: 'Anahtar doğrulandı.',
+
+    clearFailedAttempts(clientIp);
+
+    res.json({
+      message: 'Anahtar başarıyla doğrulandı.',
       product: sanitizeProduct(product),
-      boundIp: keyObj.boundIp || clientIp,
+      boundIp: keyObj.boundIp,
       remainingRequests
     });
+  } catch (err) {
+    console.error("verify-key server error:", err);
+    res.status(500).json({ error: 'Sunucu hatası: ' + (err.message || 'Veritabanı bağlantı hatası') });
   }
-
-  // First use: Bind IP and mark as used
-  keyObj.isUsed = true;
-  keyObj.usedAt = new Date().toISOString();
-  keyObj.boundIp = clientIp;
-  await db.saveKey(keyObj);
-
-  const remainingRequests = Math.max(0, 3 - (keyObj.codeRequestCount || 0));
-
-  clearFailedAttempts(clientIp);
-
-  res.json({
-    message: 'Anahtar başarıyla doğrulandı.',
-    product: sanitizeProduct(product),
-    boundIp: keyObj.boundIp,
-    remainingRequests
-  });
 });
 
 // User Endpoint: Get dynamic 2FA code

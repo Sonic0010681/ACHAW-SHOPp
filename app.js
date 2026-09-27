@@ -57,13 +57,28 @@ async function verifyKey(otpCode = '') {
       payload.code = otpCode;
     }
 
-    const response = await fetch('/api/verify-key', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+    let response;
+    try {
+      response = await fetch('/api/verify-key', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+    } catch (fetchErr) {
+      if (fetchErr.name === 'AbortError') {
+        showAlert('Sunucu yanıt vermedi (Zaman aşımı). Lütfen sunucunuzun veya internetinizin aktif olduğunu kontrol edin.', 'error');
+        return;
+      }
+      throw fetchErr;
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     const data = await response.json();
 
